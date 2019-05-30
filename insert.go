@@ -12,19 +12,23 @@ type InsertStmt struct {
 	runner
 	EventReceiver
 	Dialect
-
 	raw
-
 	Table        string
 	Column       []string
 	Value        [][]interface{}
+	RunLen       int
 	ReturnColumn []string
 	RecordID     *int64
+	showsql      bool
 }
 
 type InsertBuilder = InsertStmt
 
 func (b *InsertStmt) Build(d Dialect, buf Buffer) error {
+	//赋予批量插入默认最大上限
+	if b.RunLen==0{
+		b.RunLen=1000
+	}
 	if b.raw.Query != "" {
 		return b.raw.Build(d, buf)
 	}
@@ -54,16 +58,23 @@ func (b *InsertStmt) Build(d Dialect, buf Buffer) error {
 	buf.WriteString(") VALUES ")
 	placeholderBuf.WriteString(")")
 	placeholderStr := placeholderBuf.String()
-
+	var runnum int
 	for i, tuple := range b.Value {
+
+		//超过更新行数
+		if i>=b.RunLen{
+			break
+		}
+		//更新数量
+		runnum++
 		if i > 0 {
 			buf.WriteString(", ")
 		}
 		buf.WriteString(placeholderStr)
-
 		buf.WriteValue(tuple...)
 	}
-
+	//进行截取
+	b.Value=b.Value[runnum:]
 	if len(b.ReturnColumn) > 0 {
 		buf.WriteString(" RETURNING ")
 		for i, col := range b.ReturnColumn {
@@ -175,6 +186,17 @@ func (b *InsertStmt) Record(structValue interface{}) *InsertStmt {
 	return b
 }
 
+//插入map，key为column，value为value
+func (b *InsertStmt) Map(kv map[string]interface{}) *InsertStmt {
+	value := []interface{}{}
+	for k, v := range kv {
+		b.Column = append(b.Column, k)
+		value = append(value, v)
+	}
+	b.Value = append(b.Value, value)
+	return b
+}
+
 // Returning specifies the returning columns for postgres.
 func (b *InsertStmt) Returning(column ...string) *InsertStmt {
 	b.ReturnColumn = column
@@ -196,27 +218,43 @@ func (b *InsertStmt) Pair(column string, value interface{}) *InsertStmt {
 	return b
 }
 
+func (b *InsertStmt) ShowSql() *InsertStmt {
+	b.showsql = true
+	return b
+}
+
 func (b *InsertStmt) Exec() (sql.Result, error) {
 	return b.ExecContext(context.Background())
 }
+// Returning specifies the returning columns for postgres.
+func (b *InsertStmt) SetRunLen(i int) *InsertStmt {
+	//b.runnum
+	b.RunLen = i
+	return b
+}
 
 func (b *InsertStmt) ExecContext(ctx context.Context) (sql.Result, error) {
-	result, err := exec(ctx, b.runner, b.EventReceiver, b, b.Dialect)
-	if err != nil {
-		return nil, err
-	}
-
-	if b.RecordID != nil {
-		if id, err := result.LastInsertId(); err == nil {
-			*b.RecordID = id
+	showSql(b.showsql, b, b.Dialect)
+	var err error
+	var result sql.Result
+	for len(b.Value) > 0 && err == nil {
+		//_, err = b.ExecContext(context.Background())
+		result, err = exec(ctx, b.runner, b.EventReceiver, b, b.Dialect)
+		if err != nil {
+			return nil, err
 		}
-		b.RecordID = nil
+		if b.RecordID != nil {
+			if id, err := result.LastInsertId(); err == nil {
+				*b.RecordID = id
+			}
+			b.RecordID = nil
+		}
 	}
-
 	return result, nil
 }
 
 func (b *InsertStmt) LoadContext(ctx context.Context, value interface{}) error {
+	showSql(b.showsql, b, b.Dialect)
 	_, err := query(ctx, b.runner, b.EventReceiver, b, b.Dialect, value)
 	return err
 }

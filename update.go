@@ -14,11 +14,11 @@ type UpdateStmt struct {
 
 	raw
 
-	Table        string
-	Value        map[string]interface{}
-	WhereCond    []Builder
-	ReturnColumn []string
-	LimitCount   int64
+	Table      string
+	Value      map[string]interface{}
+	WhereCond  []Builder
+	LimitCount int64
+	showsql    bool
 }
 
 type UpdateBuilder = UpdateStmt
@@ -47,9 +47,13 @@ func (b *UpdateStmt) Build(d Dialect, buf Buffer) error {
 		}
 		buf.WriteString(d.QuoteIdent(col))
 		buf.WriteString(" = ")
-		buf.WriteString(placeholder)
-
-		buf.WriteValue(v)
+		switch v := v.(type) {
+		case raw:
+			v.Build(d, buf)
+		default:
+			buf.WriteString(placeholder)
+			buf.WriteValue(v)
+		}
 		i++
 	}
 
@@ -59,16 +63,8 @@ func (b *UpdateStmt) Build(d Dialect, buf Buffer) error {
 		if err != nil {
 			return err
 		}
-	}
-
-	if len(b.ReturnColumn) > 0 {
-		buf.WriteString(" RETURNING ")
-		for i, col := range b.ReturnColumn {
-			if i > 0 {
-				buf.WriteString(",")
-			}
-			buf.WriteString(d.QuoteIdent(col))
-		}
+	}else{
+		panic("没有条件")
 	}
 
 	if b.LimitCount >= 0 {
@@ -148,12 +144,6 @@ func (b *UpdateStmt) Where(query interface{}, value ...interface{}) *UpdateStmt 
 	return b
 }
 
-// Returning specifies the returning columns for postgres.
-func (b *UpdateStmt) Returning(column ...string) *UpdateStmt {
-	b.ReturnColumn = column
-	return b
-}
-
 // Set updates column with value.
 func (b *UpdateStmt) Set(column string, value interface{}) *UpdateStmt {
 	b.Value[column] = value
@@ -173,19 +163,16 @@ func (b *UpdateStmt) Limit(n uint64) *UpdateStmt {
 	return b
 }
 
+func (b *UpdateStmt) ShowSql() *UpdateStmt {
+	b.showsql = true
+	return b
+}
+
 func (b *UpdateStmt) Exec() (sql.Result, error) {
 	return b.ExecContext(context.Background())
 }
 
 func (b *UpdateStmt) ExecContext(ctx context.Context) (sql.Result, error) {
+	showSql(b.showsql, b, b.Dialect)
 	return exec(ctx, b.runner, b.EventReceiver, b, b.Dialect)
-}
-
-func (b *UpdateStmt) LoadContext(ctx context.Context, value interface{}) error {
-	_, err := query(ctx, b.runner, b.EventReceiver, b, b.Dialect, value)
-	return err
-}
-
-func (b *UpdateStmt) Load(value interface{}) error {
-	return b.LoadContext(context.Background(), value)
 }

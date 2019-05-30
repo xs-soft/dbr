@@ -5,9 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
-
 	"github.com/gocraft/dbr/dialect"
+	"time"
 )
 
 // Open creates a Connection.
@@ -213,4 +212,14 @@ func query(ctx context.Context, runner runner, log EventReceiver, builder Builde
 		})
 	}
 	return count, nil
+}
+
+func showSql(show bool, b Builder, d Dialect) {
+	if show {
+		fmt.Println("输出日志")
+		buf := NewBuffer()
+		b.Build(d, buf)
+		fmt.Println(buf.String())
+		fmt.Println(buf.Value())
+	}
 }

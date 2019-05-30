@@ -5,7 +5,11 @@ import (
 )
 
 func buildCond(d Dialect, buf Buffer, pred string, cond ...Builder) error {
-	for i, c := range cond {
+	i := 0
+	for _, c := range cond {
+		if c == nil {
+			continue
+		}
 		if i > 0 {
 			buf.WriteString(" ")
 			buf.WriteString(pred)
@@ -17,6 +21,7 @@ func buildCond(d Dialect, buf Buffer, pred string, cond ...Builder) error {
 			return err
 		}
 		buf.WriteString(")")
+		i++
 	}
 	return nil
 }

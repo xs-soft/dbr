@@ -3,6 +3,8 @@ package dbr
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"reflect"
 	"strconv"
 )
 
@@ -15,19 +17,20 @@ type SelectStmt struct {
 	raw
 
 	IsDistinct bool
-
-	Column    []interface{}
-	Table     interface{}
-	JoinTable []Builder
+	IsLock     *bool
+	Column     []interface{}
+	Table      interface{}
+	TableAs    string
+	JoinTable  []Builder
 
 	WhereCond  []Builder
 	Group      []Builder
 	HavingCond []Builder
 	Order      []Builder
-	Suffixes   []Builder
 
 	LimitCount  int64
 	OffsetCount int64
+	showsql     bool
 }
 
 type SelectBuilder = SelectStmt
@@ -64,12 +67,20 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 	if b.Table != nil {
 		buf.WriteString(" FROM ")
 		switch table := b.Table.(type) {
+		case Builder:
+			buf.WriteString("(")
+			table.Build(d, buf)
+			buf.WriteString(")")
 		case string:
 			// FIXME: no quote ident
 			buf.WriteString(table)
 		default:
 			buf.WriteString(placeholder)
 			buf.WriteValue(table)
+		}
+		if b.TableAs != "" {
+			buf.WriteString(" As ")
+			buf.WriteString(b.TableAs)
 		}
 		if len(b.JoinTable) > 0 {
 			for _, join := range b.JoinTable {
@@ -132,17 +143,14 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 		buf.WriteString(" OFFSET ")
 		buf.WriteString(strconv.FormatInt(b.OffsetCount, 10))
 	}
-
-	if len(b.Suffixes) > 0 {
-		for _, suffix := range b.Suffixes {
-			buf.WriteString(" ")
-			err := suffix.Build(d, buf)
-			if err != nil {
-				return err
-			}
+	//如果未设置Lock.并且是实物
+	if b.IsLock == nil {
+		if _, ok := b.runner.(*Tx); ok {
+			buf.WriteString(" FOR UPDATE ")
 		}
+	} else if *b.IsLock {
+		buf.WriteString(" FOR UPDATE ")
 	}
-
 	return nil
 }
 
@@ -213,13 +221,21 @@ func (tx *Tx) SelectBySql(query string, value ...interface{}) *SelectStmt {
 
 // From specifies table to select from.
 // table can be Builder like SelectStmt, or string.
-func (b *SelectStmt) From(table interface{}) *SelectStmt {
+func (b *SelectStmt) From(table interface{}, as ...string) *SelectStmt {
 	b.Table = table
+	if len(as) > 0 {
+		b.TableAs = as[0]
+	}
 	return b
 }
 
 func (b *SelectStmt) Distinct() *SelectStmt {
 	b.IsDistinct = true
+	return b
+}
+
+func (b *SelectStmt) Lock(l bool) *SelectStmt {
+	b.IsLock = &l
 	return b
 }
 
@@ -281,12 +297,6 @@ func (b *SelectStmt) Offset(n uint64) *SelectStmt {
 	return b
 }
 
-// Suffix adds an expression to the end of the query. This is useful to add dialect-specific clauses like FOR UPDATE
-func (b *SelectStmt) Suffix(suffix string, value ...interface{}) *SelectStmt {
-	b.Suffixes = append(b.Suffixes, Expr(suffix, value...))
-	return b
-}
-
 // Paginate fetches a page in a naive way for a small set of data.
 func (b *SelectStmt) Paginate(page, perPage uint64) *SelectStmt {
 	b.Limit(perPage)
@@ -332,6 +342,11 @@ func (b *SelectStmt) FullJoin(table, on interface{}) *SelectStmt {
 	return b
 }
 
+func (b *SelectStmt) ShowSql() *SelectStmt {
+	b.showsql = true
+	return b
+}
+
 // As creates alias for select statement.
 func (b *SelectStmt) As(alias string) Builder {
 	return as(b, alias)
@@ -343,11 +358,13 @@ func (b *SelectStmt) Rows() (*sql.Rows, error) {
 }
 
 func (b *SelectStmt) RowsContext(ctx context.Context) (*sql.Rows, error) {
+	showSql(b.showsql, b, b.Dialect)
 	_, rows, err := queryRows(ctx, b.runner, b.EventReceiver, b, b.Dialect)
 	return rows, err
 }
 
 func (b *SelectStmt) LoadOneContext(ctx context.Context, value interface{}) error {
+	showSql(b.showsql, b, b.Dialect)
 	count, err := query(ctx, b.runner, b.EventReceiver, b, b.Dialect, value)
 	if err != nil {
 		return err
@@ -367,6 +384,7 @@ func (b *SelectStmt) LoadOne(value interface{}) error {
 }
 
 func (b *SelectStmt) LoadContext(ctx context.Context, value interface{}) (int, error) {
+	showSql(b.showsql, b, b.Dialect)
 	return query(ctx, b.runner, b.EventReceiver, b, b.Dialect, value)
 }
 
@@ -375,4 +393,139 @@ func (b *SelectStmt) LoadContext(ctx context.Context, value interface{}) (int, e
 // See https://godoc.org/github.com/gocraft/dbr#Load.
 func (b *SelectStmt) Load(value interface{}) (int, error) {
 	return b.LoadContext(context.Background(), value)
+}
+
+// Params stores the Params
+type Maps map[string]interface{}
+
+// ParamsList stores paramslist
+type Lists []interface{}
+
+func (b *SelectStmt) Maps(container *[]Maps, cols ...string) (int64, error) {
+	return b.readValues(container, cols)
+}
+
+func (b *SelectStmt) Lists(container *[]Lists, cols ...string) (int64, error) {
+	return b.readValues(container, cols)
+}
+
+func (b *SelectStmt) readValues(container interface{}, needCols []string) (int64, error) {
+	showSql(b.showsql, b, b.Dialect)
+	var (
+		maps  []Maps
+		lists []Lists
+		list  Lists
+	)
+
+	typ := 0
+	switch container.(type) {
+	case *[]Maps:
+		typ = 1
+	case *[]Lists:
+		typ = 2
+	case *Lists:
+		typ = 3
+	default:
+		panic(fmt.Errorf("<RawSeter> unsupport read values type `%T`", container))
+	}
+
+	var rs *sql.Rows
+
+	rs, err := b.Rows()
+	if err != nil {
+		return 0, err
+	}
+	defer rs.Close()
+
+	var (
+		refs   []interface{}
+		cnt    int64
+		cols   []string
+		indexs []int
+	)
+
+	for rs.Next() {
+		if cnt == 0 {
+			columns, err := rs.Columns()
+			if err != nil {
+				return 0, err
+			}
+			if len(needCols) > 0 {
+				indexs = make([]int, 0, len(needCols))
+			} else {
+				indexs = make([]int, 0, len(columns))
+			}
+
+			cols = columns
+			refs = make([]interface{}, len(cols))
+			for i := range refs {
+				var ref sql.NullString
+				refs[i] = &ref
+
+				if len(needCols) > 0 {
+					for _, c := range needCols {
+						if c == cols[i] {
+							indexs = append(indexs, i)
+						}
+					}
+				} else {
+					indexs = append(indexs, i)
+				}
+			}
+		}
+
+		if err := rs.Scan(refs...); err != nil {
+			return 0, err
+		}
+
+		switch typ {
+		case 1:
+			params := make(Maps, len(cols))
+			for _, i := range indexs {
+				ref := refs[i]
+				value := reflect.Indirect(reflect.ValueOf(ref)).Interface().(sql.NullString)
+				if value.Valid {
+					params[cols[i]] = value.String
+				} else {
+					params[cols[i]] = nil
+				}
+			}
+			maps = append(maps, params)
+		case 2:
+			params := make(Lists, 0, len(cols))
+			for _, i := range indexs {
+				ref := refs[i]
+				value := reflect.Indirect(reflect.ValueOf(ref)).Interface().(sql.NullString)
+				if value.Valid {
+					params = append(params, value.String)
+				} else {
+					params = append(params, nil)
+				}
+			}
+			lists = append(lists, params)
+		case 3:
+			for _, i := range indexs {
+				ref := refs[i]
+				value := reflect.Indirect(reflect.ValueOf(ref)).Interface().(sql.NullString)
+				if value.Valid {
+					list = append(list, value.String)
+				} else {
+					list = append(list, nil)
+				}
+			}
+		}
+
+		cnt++
+	}
+
+	switch v := container.(type) {
+	case *[]Maps:
+		*v = maps
+	case *[]Lists:
+		*v = lists
+	case *Lists:
+		*v = list
+	}
+
+	return cnt, nil
 }
