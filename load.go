@@ -73,7 +73,6 @@ func Load(rows *sql.Rows, value interface{}) (int, error) {
 		} else {
 			elem = v
 		}
-
 		if isMap {
 			err := s.findPtr(elem, column[1:], ptr[1:])
 			if err != nil {
@@ -102,14 +101,15 @@ func Load(rows *sql.Rows, value interface{}) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		for i := range ptr {
-			ptr[i] = nil
-		}
-
 		count++
-
 		if isSlice {
+			if elem.Kind()==reflect.Map{
+				for i,name:= range column{
+					elem.SetMapIndex(reflect.ValueOf(name),reflect.ValueOf(ptr[i]).Elem())
+				}
+			}
 			v.Set(reflect.Append(v, elem))
+
 		} else if isMapOfSlices {
 			s := v.MapIndex(keyElem)
 			if !s.IsValid() {
@@ -120,6 +120,9 @@ func Load(rows *sql.Rows, value interface{}) (int, error) {
 			v.SetMapIndex(keyElem, elem)
 		} else {
 			break
+		}
+		for i := range ptr {
+			ptr[i] = nil
 		}
 	}
 	return count, nil
