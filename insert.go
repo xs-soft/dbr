@@ -189,9 +189,16 @@ func (b *InsertStmt) Record(structValue interface{}) *InsertStmt {
 //插入map，key为column，value为value
 func (b *InsertStmt) Map(kv map[string]interface{}) *InsertStmt {
 	value := []interface{}{}
-	for k, v := range kv {
-		b.Column = append(b.Column, k)
-		value = append(value, v)
+	if len(b.Column) == 0 {
+		for k, v := range kv {
+			b.Column = append(b.Column, k)
+			value = append(value, v)
+		}
+	} else {
+		for _, col := range b.Column {
+			v := kv[col]
+			value = append(value, v)
+		}
 	}
 	b.Value = append(b.Value, value)
 	return b
