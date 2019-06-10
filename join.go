@@ -23,7 +23,7 @@ func join(t joinType, table interface{}, on interface{}) Builder {
 		buf.WriteString("JOIN ")
 		switch table := table.(type) {
 		case string:
-			buf.WriteString(d.QuoteIdent(table))
+			buf.WriteString(table)
 		default:
 			buf.WriteString(placeholder)
 			buf.WriteValue(table)

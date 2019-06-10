@@ -2,6 +2,7 @@ package dbr
 
 import (
 	"database/sql/driver"
+	"errors"
 	"reflect"
 	"strings"
 )
@@ -99,6 +100,18 @@ func (s *tagStore) findPtr(value reflect.Value, name []string, ptr []interface{}
 			value.Set(reflect.New(value.Type().Elem()))
 		}
 		return s.findPtr(value.Elem(), name, ptr)
+	case reflect.Map:
+		if value.Type().Key().Kind()!=reflect.String{
+			return errors.New("Scan map elem key type not is string")
+		}
+		if value.IsNil() {
+			value.Set(reflect.MakeMap(value.Type()))
+		}
+		for i,_:=range name{
+			val:=reflectAlloc(value.Type().Elem())
+			ptr[i]=val.Addr().Interface()
+		}
+		return nil
 	default:
 		ptr[0] = value.Addr().Interface()
 		return nil

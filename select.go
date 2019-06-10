@@ -15,19 +15,20 @@ type SelectStmt struct {
 	raw
 
 	IsDistinct bool
-
-	Column    []interface{}
-	Table     interface{}
-	JoinTable []Builder
+	IsLock     *bool
+	Column     []interface{}
+	Table      interface{}
+	TableAs    string
+	JoinTable  []Builder
 
 	WhereCond  []Builder
 	Group      []Builder
 	HavingCond []Builder
 	Order      []Builder
-	Suffixes   []Builder
 
 	LimitCount  int64
 	OffsetCount int64
+	showsql     bool
 }
 
 type SelectBuilder = SelectStmt
@@ -64,12 +65,20 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 	if b.Table != nil {
 		buf.WriteString(" FROM ")
 		switch table := b.Table.(type) {
+		case Builder:
+			buf.WriteString("(")
+			table.Build(d, buf)
+			buf.WriteString(")")
 		case string:
 			// FIXME: no quote ident
 			buf.WriteString(table)
 		default:
 			buf.WriteString(placeholder)
 			buf.WriteValue(table)
+		}
+		if b.TableAs != "" {
+			buf.WriteString(" As ")
+			buf.WriteString(b.TableAs)
 		}
 		if len(b.JoinTable) > 0 {
 			for _, join := range b.JoinTable {
@@ -132,17 +141,14 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 		buf.WriteString(" OFFSET ")
 		buf.WriteString(strconv.FormatInt(b.OffsetCount, 10))
 	}
-
-	if len(b.Suffixes) > 0 {
-		for _, suffix := range b.Suffixes {
-			buf.WriteString(" ")
-			err := suffix.Build(d, buf)
-			if err != nil {
-				return err
-			}
+	//如果未设置Lock.并且是实物
+	if b.IsLock == nil {
+		if _, ok := b.runner.(*Tx); ok {
+			buf.WriteString(" FOR UPDATE ")
 		}
+	} else if *b.IsLock {
+		buf.WriteString(" FOR UPDATE ")
 	}
-
 	return nil
 }
 
@@ -213,13 +219,21 @@ func (tx *Tx) SelectBySql(query string, value ...interface{}) *SelectStmt {
 
 // From specifies table to select from.
 // table can be Builder like SelectStmt, or string.
-func (b *SelectStmt) From(table interface{}) *SelectStmt {
+func (b *SelectStmt) From(table interface{}, as ...string) *SelectStmt {
 	b.Table = table
+	if len(as) > 0 {
+		b.TableAs = as[0]
+	}
 	return b
 }
 
 func (b *SelectStmt) Distinct() *SelectStmt {
 	b.IsDistinct = true
+	return b
+}
+
+func (b *SelectStmt) Lock(l bool) *SelectStmt {
+	b.IsLock = &l
 	return b
 }
 
@@ -281,12 +295,6 @@ func (b *SelectStmt) Offset(n uint64) *SelectStmt {
 	return b
 }
 
-// Suffix adds an expression to the end of the query. This is useful to add dialect-specific clauses like FOR UPDATE
-func (b *SelectStmt) Suffix(suffix string, value ...interface{}) *SelectStmt {
-	b.Suffixes = append(b.Suffixes, Expr(suffix, value...))
-	return b
-}
-
 // Paginate fetches a page in a naive way for a small set of data.
 func (b *SelectStmt) Paginate(page, perPage uint64) *SelectStmt {
 	b.Limit(perPage)
@@ -332,6 +340,11 @@ func (b *SelectStmt) FullJoin(table, on interface{}) *SelectStmt {
 	return b
 }
 
+func (b *SelectStmt) ShowSql() *SelectStmt {
+	b.showsql = true
+	return b
+}
+
 // As creates alias for select statement.
 func (b *SelectStmt) As(alias string) Builder {
 	return as(b, alias)
@@ -343,11 +356,13 @@ func (b *SelectStmt) Rows() (*sql.Rows, error) {
 }
 
 func (b *SelectStmt) RowsContext(ctx context.Context) (*sql.Rows, error) {
+	showSql(b.showsql, b, b.Dialect)
 	_, rows, err := queryRows(ctx, b.runner, b.EventReceiver, b, b.Dialect)
 	return rows, err
 }
 
 func (b *SelectStmt) LoadOneContext(ctx context.Context, value interface{}) error {
+	showSql(b.showsql, b, b.Dialect)
 	count, err := query(ctx, b.runner, b.EventReceiver, b, b.Dialect, value)
 	if err != nil {
 		return err
@@ -367,6 +382,7 @@ func (b *SelectStmt) LoadOne(value interface{}) error {
 }
 
 func (b *SelectStmt) LoadContext(ctx context.Context, value interface{}) (int, error) {
+	showSql(b.showsql, b, b.Dialect)
 	return query(ctx, b.runner, b.EventReceiver, b, b.Dialect, value)
 }
 
